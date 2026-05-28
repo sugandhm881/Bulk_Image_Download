@@ -1,0 +1,12 @@
+venv/
+backend/venv/
+**pycache**/
+*.pyc
+.env
+downloads/
+reports/
+temp/
+node_modules/
+dist/
+.vscode/
+.DS_Store
