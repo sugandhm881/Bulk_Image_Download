@@ -10,12 +10,6 @@ import UploadBox from "../components/UploadBox";
 import StatsCard from "../components/StatsCard";
 import DownloadTable from "../components/DownloadTable";
 
-function base64ToBlobUrl(b64) {
-  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-  const blob = new Blob([bytes], { type: "application/zip" });
-  return URL.createObjectURL(blob);
-}
-
 function Dashboard() {
 
   const [summary, setSummary] = useState(null);
@@ -23,15 +17,15 @@ function Dashboard() {
   const [downloadUrl, setDownloadUrl] = useState(null);
   const [filename, setFilename] = useState("images.zip");
 
-  const handleComplete = (data) => {
-    setSummary(data.summary || null);
-    setResults(data.results || []);
+  const handleComplete = ({ summary, blob, filename }) => {
+    setSummary(summary || null);
+    setResults([]);
 
     if (downloadUrl) URL.revokeObjectURL(downloadUrl);
 
-    if (data.zip_base64) {
-      setDownloadUrl(base64ToBlobUrl(data.zip_base64));
-      setFilename(data.filename || "images.zip");
+    if (blob && blob.size > 0) {
+      setDownloadUrl(URL.createObjectURL(blob));
+      setFilename(filename || "images.zip");
     } else {
       setDownloadUrl(null);
     }

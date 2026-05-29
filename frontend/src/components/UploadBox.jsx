@@ -30,24 +30,44 @@ function UploadBox({ onComplete }) {
 
       setLoading(true);
 
-      const { data } = await API.post(
-        "/upload-excel",
-        formData,
+      const res = await fetch(
+        `${API.defaults.baseURL}/upload-excel`,
         {
-          headers: { "Content-Type": "multipart/form-data" },
+          method: "POST",
+          body: formData,
         }
       );
 
-      if (onComplete) onComplete(data);
+      if (!res.ok) {
+        let msg = "Upload Failed";
+        try {
+          const j = await res.json();
+          if (j.message) msg = j.message;
+        } catch {
+          // response was not JSON
+        }
+        throw new Error(msg);
+      }
 
-      toast.success(data.message || "Download Completed Successfully");
+      const summaryHeader = res.headers.get("X-Summary");
+      const summary = summaryHeader ? JSON.parse(summaryHeader) : null;
+
+      const dispo = res.headers.get("Content-Disposition") || "";
+      const match = dispo.match(/filename="?([^"]+)"?/);
+      const filename = match ? match[1] : "images.zip";
+
+      const blob = await res.blob();
+
+      if (onComplete) onComplete({ summary, blob, filename });
+
+      toast.success("Download Completed Successfully");
 
       clearFile();
 
     } catch (error) {
 
       console.error(error);
-      toast.error("Upload Failed");
+      toast.error(error.message || "Upload Failed");
 
     } finally {
 

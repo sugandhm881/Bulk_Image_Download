@@ -1,8 +1,8 @@
-from fastapi import APIRouter, UploadFile, File
+from fastapi import APIRouter, UploadFile, File, Response
 from fastapi.responses import JSONResponse
 
-import base64
 import io
+import json
 import zipfile
 import asyncio
 import aiohttp
@@ -147,21 +147,32 @@ async def upload_excel(file: UploadFile = File(...)):
 
     summary = summarize(results)
 
-    zip_b64 = None
+    if not contents:
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": "No images could be downloaded from the file.",
+                "summary": summary,
+            },
+            status_code=400,
+        )
+
     filename = f"images_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
 
-    if contents:
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for arcname, data in contents:
-                zf.writestr(arcname, data)
-            zf.writestr("report.csv", build_report_csv(results))
-        zip_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for arcname, data in contents:
+            zf.writestr(arcname, data)
+        zf.writestr("report.csv", build_report_csv(results))
 
-    return {
-        "message": "Download Completed Successfully",
-        "summary": summary,
-        "results": results,
-        "filename": filename,
-        "zip_base64": zip_b64,
-    }
+    # Return the ZIP as raw binary (no base64) so the browser handles it as an
+    # efficient Blob. Summary counts ride along in a header for the stat cards.
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Summary": json.dumps(summary),
+            "Access-Control-Expose-Headers": "X-Summary, Content-Disposition",
+        },
+    )
