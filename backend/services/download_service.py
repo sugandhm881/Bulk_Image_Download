@@ -1,5 +1,3 @@
-import aiohttp
-import aiofiles
 import os
 import asyncio
 
@@ -7,92 +5,59 @@ from utils.helpers import (
     get_filename_from_url
 )
 
-from utils.file_manager import (
-    create_folder,
-    file_exists
-)
 
-async def download_image(
-    session,
-    url,
-    save_folder,
-    user_name,
-    date_str,
-    counter,
-    total=1
-):
+async def download_image(session, spec):
+    """Fetch one image and return its bytes in-memory (no disk writes).
+
+    spec = {url, user, date, month, counter, total}
+    Returns a result dict; on success it carries the bytes under "_content".
+    """
+
+    url = spec["url"]
 
     try:
 
-        create_folder(save_folder)
-
         original_filename = get_filename_from_url(url)
 
-        extension = os.path.splitext(
-            original_filename
-        )[1]
+        extension = os.path.splitext(original_filename)[1]
 
         if not extension:
             extension = ".jpg"
 
         # Single image for this user + date -> no numeric suffix.
         # Multiple images -> Bill_<name>_<date>_1, _2, ...
-        if total > 1:
-            filename = (
-                f"Bill_{user_name}_{date_str}_{counter}{extension}"
-            )
+        if spec["total"] > 1:
+            filename = f"Bill_{spec['user']}_{spec['date']}_{spec['counter']}{extension}"
         else:
-            filename = (
-                f"Bill_{user_name}_{date_str}{extension}"
-            )
+            filename = f"Bill_{spec['user']}_{spec['date']}{extension}"
 
-        save_path = os.path.join(
-            save_folder,
-            filename
-        )
+        # Forward slashes so the structure is preserved inside the zip.
+        arcname = f"{spec['user']}/{spec['month']}/{filename}"
 
-        if file_exists(save_path):
-
-            return {
-                "status": "duplicate",
-                "file": save_path
-            }
-
-        retries = 3
-
-        for attempt in range(retries):
+        for _ in range(3):
 
             try:
 
-                async with session.get(
-                    url,
-                    timeout=30
-                ) as response:
+                async with session.get(url, timeout=20) as response:
 
                     if response.status == 200:
 
                         content = await response.read()
 
-                        async with aiofiles.open(
-                            save_path,
-                            "wb"
-                        ) as f:
-
-                            await f.write(content)
-
                         return {
                             "status": "success",
-                            "file": save_path,
-                            "size": len(content)
+                            "file": arcname,
+                            "size": len(content),
+                            "_content": content,
                         }
 
             except Exception:
 
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
 
         return {
             "status": "failed",
-            "url": url
+            "url": url,
         }
 
     except Exception as e:
@@ -100,5 +65,5 @@ async def download_image(
         return {
             "status": "error",
             "url": url,
-            "error": str(e)
+            "error": str(e),
         }

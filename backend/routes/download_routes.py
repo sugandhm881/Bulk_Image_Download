@@ -1,27 +1,17 @@
-from fastapi import (
-    APIRouter,
-    UploadFile,
-    File,
-    HTTPException
-)
-from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
-from starlette.background import BackgroundTask
+from fastapi import APIRouter, UploadFile, File
+from fastapi.responses import JSONResponse
 
-import shutil
-import os
-import re
-import json
-import time
-import uuid
-import tempfile
-import aiohttp
+import base64
+import io
+import zipfile
 import asyncio
+import aiohttp
 from collections import defaultdict
 from datetime import datetime
-import pandas as pd
 
 from services.excel_service import (
-    extract_urls_from_text
+    extract_urls_from_text,
+    read_rows,
 )
 
 from services.download_service import (
@@ -29,102 +19,81 @@ from services.download_service import (
 )
 
 from services.report_service import (
-    generate_download_report
+    summarize,
+    build_report_csv,
 )
 
 router = APIRouter()
 
-# Temp working areas only — nothing persists in the project folder.
-UPLOAD_FOLDER = tempfile.mkdtemp(prefix="bid_upload_")
-ZIP_FOLDER = tempfile.mkdtemp(prefix="bid_zips_")
+
+def parse_date(value):
+
+    if isinstance(value, datetime):
+        return value
+
+    if value is None:
+        return None
+
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(str(value).strip(), fmt)
+        except Exception:
+            continue
+
+    return None
 
 
 @router.post("/upload-excel")
-async def upload_excel(
-    file: UploadFile = File(...)
-):
+async def upload_excel(file: UploadFile = File(...)):
 
     # ====================================
-    # SAVE + PARSE EXCEL (temp, deleted after read)
+    # READ EXCEL (in-memory)
     # ====================================
-
-    safe_name = os.path.basename(
-        file.filename or "upload.xlsx"
-    )
-
-    upload_path = os.path.join(
-        UPLOAD_FOLDER,
-        safe_name
-    )
-
-    with open(upload_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
 
     try:
-        df = pd.read_excel(upload_path)
+        file_bytes = await file.read()
+        headers, rows = read_rows(file_bytes)
     except Exception as e:
         return JSONResponse(
             {"status": "error", "message": f"Could not read Excel: {e}"},
-            status_code=400
+            status_code=400,
         )
-    finally:
-        if os.path.exists(upload_path):
-            os.remove(upload_path)
 
     # ====================================
-    # BUILD DOWNLOAD SPECS (folders under a temp batch dir)
+    # BUILD DOWNLOAD SPECS
     # ====================================
-
-    batch_dir = tempfile.mkdtemp(prefix="bid_batch_")
 
     specs = []
     pre_errors = []
     processed_urls = set()
 
-    for index, row in df.iterrows():
+    for index, row in enumerate(rows):
 
         try:
 
-            user_name = str(
-                row.get("user_name", f"user_{index}")
-            ).strip()
+            user_name = str(row.get("user_name") or f"user_{index}").strip()
+            if not user_name:
+                user_name = f"user_{index}"
 
-            date_str = datetime.now().strftime("%d-%m-%Y")
+            now = datetime.now()
+            date_str = now.strftime("%d-%m-%Y")
+            month_folder = now.strftime("%B-%Y")
 
-            if "bill_date" in row:
-                try:
-                    bill_date = pd.to_datetime(row["bill_date"])
-                    date_str = bill_date.strftime("%d-%m-%Y")
-                    month_folder = bill_date.strftime("%B-%Y")
-                except:
-                    month_folder = datetime.now().strftime("%B-%Y")
-            else:
-                month_folder = datetime.now().strftime("%B-%Y")
+            bill_date = parse_date(row.get("bill_date")) if "bill_date" in row else None
+            if bill_date:
+                date_str = bill_date.strftime("%d-%m-%Y")
+                month_folder = bill_date.strftime("%B-%Y")
 
-            month_subfolder = os.path.join(
-                batch_dir,
-                user_name,
-                month_folder
-            )
-
-            os.makedirs(month_subfolder, exist_ok=True)
-
-            for column in df.columns:
-
-                urls = extract_urls_from_text(row[column])
-
-                for url in urls:
-
+            for header in headers:
+                for url in extract_urls_from_text(row.get(header)):
                     if url in processed_urls:
                         continue
-
                     processed_urls.add(url)
-
                     specs.append({
                         "url": url,
-                        "folder": month_subfolder,
-                        "user_name": user_name,
-                        "date_str": date_str,
+                        "user": user_name,
+                        "date": date_str,
+                        "month": month_folder,
                     })
 
         except Exception as e:
@@ -132,155 +101,67 @@ async def upload_excel(
 
     # ====================================
     # NAMING: number only when a user+date has more than one image
-    # (single -> Bill_<name>_<date>, multiple -> Bill_<name>_<date>_1, _2, ...)
     # ====================================
 
     group_total = defaultdict(int)
     for s in specs:
-        group_total[(s["user_name"], s["date_str"])] += 1
+        group_total[(s["user"], s["date"])] += 1
 
     group_seen = defaultdict(int)
     for s in specs:
-        key = (s["user_name"], s["date_str"])
+        key = (s["user"], s["date"])
         group_seen[key] += 1
         s["counter"] = group_seen[key]
         s["total"] = group_total[key]
 
     # ====================================
-    # STREAM PROGRESS AS EACH DOWNLOAD COMPLETES
+    # DOWNLOAD (concurrent, in-memory)
     # ====================================
 
-    async def event_stream():
+    results = list(pre_errors)
+    contents = []
 
-        results = list(pre_errors)
+    connector = aiohttp.TCPConnector(limit=30)
+    timeout = aiohttp.ClientTimeout(total=25)
 
-        total = len(specs)
-        done = 0
-        success = 0
-        failed = 0
-        duplicates = 0
-        total_bytes = 0
-        start = time.monotonic()
+    async with aiohttp.ClientSession(
+        connector=connector,
+        timeout=timeout,
+    ) as session:
 
-        yield json.dumps({"type": "start", "total": total}) + "\n"
+        tasks = [
+            asyncio.create_task(download_image(session, s))
+            for s in specs
+        ]
 
-        connector = aiohttp.TCPConnector(limit=50)
-        timeout = aiohttp.ClientTimeout(total=60)
+        for fut in asyncio.as_completed(tasks):
+            res = await fut
+            content = res.pop("_content", None)
+            if content is not None:
+                contents.append((res["file"], content))
+            results.append(res)
 
-        async with aiohttp.ClientSession(
-            connector=connector,
-            timeout=timeout
-        ) as session:
+    # ====================================
+    # ZIP IN MEMORY + REPORT
+    # ====================================
 
-            tasks = [
-                asyncio.create_task(
-                    download_image(
-                        session,
-                        s["url"],
-                        s["folder"],
-                        s["user_name"],
-                        s["date_str"],
-                        s["counter"],
-                        s["total"]
-                    )
-                )
-                for s in specs
-            ]
+    summary = summarize(results)
 
-            for fut in asyncio.as_completed(tasks):
+    zip_b64 = None
+    filename = f"images_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
 
-                res = await fut
-                results.append(res)
-                done += 1
+    if contents:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for arcname, data in contents:
+                zf.writestr(arcname, data)
+            zf.writestr("report.csv", build_report_csv(results))
+        zip_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
-                status = res.get("status")
-
-                if status == "success":
-                    success += 1
-                    total_bytes += res.get("size", 0)
-                elif status == "duplicate":
-                    duplicates += 1
-                else:
-                    failed += 1
-
-                elapsed = time.monotonic() - start
-                speed_bps = total_bytes / elapsed if elapsed > 0 else 0
-
-                yield json.dumps({
-                    "type": "progress",
-                    "done": done,
-                    "total": total,
-                    "success": success,
-                    "failed": failed,
-                    "duplicates": duplicates,
-                    "speed_bps": speed_bps,
-                    "file": res.get("file") or res.get("url", ""),
-                }) + "\n"
-
-        # ====================================
-        # REPORT + ZIP, THEN CLEAN UP
-        # ====================================
-
-        report, _ = generate_download_report(
-            results,
-            output_dir=batch_dir
-        )
-
-        download_url = None
-        saved = report["success"] + report["duplicates"]
-
-        if saved > 0:
-            token = uuid.uuid4().hex
-            shutil.make_archive(
-                os.path.join(ZIP_FOLDER, token),
-                "zip",
-                batch_dir
-            )
-            download_url = f"/download/{token}"
-
-        shutil.rmtree(batch_dir, ignore_errors=True)
-
-        yield json.dumps({
-            "type": "done",
-            "message": "Download Completed Successfully",
-            "summary": report,
-            "download_url": download_url,
-            "results": results,
-        }) + "\n"
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="application/x-ndjson"
-    )
-
-
-@router.get("/download/{token}")
-def download_zip(token: str):
-
-    if not re.fullmatch(r"[a-f0-9]+", token):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid token"
-        )
-
-    zip_path = os.path.join(
-        ZIP_FOLDER,
-        f"{token}.zip"
-    )
-
-    if not os.path.exists(zip_path):
-        raise HTTPException(
-            status_code=404,
-            detail="File not found or already downloaded"
-        )
-
-    filename = (
-        f"images_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-    )
-
-    return FileResponse(
-        zip_path,
-        media_type="application/zip",
-        filename=filename,
-        background=BackgroundTask(os.remove, zip_path)
-    )
+    return {
+        "message": "Download Completed Successfully",
+        "summary": summary,
+        "results": results,
+        "filename": filename,
+        "zip_base64": zip_b64,
+    }

@@ -1,5 +1,4 @@
 fastapi
-uvicorn
 openpyxl
 aiohttp
 python-multipart

@@ -1,5 +1,6 @@
-import pandas as pd
 import re
+from io import BytesIO
+from openpyxl import load_workbook
 
 VALID_EXTENSIONS = (
     ".jpg",
@@ -7,12 +8,13 @@ VALID_EXTENSIONS = (
     ".png",
     ".gif",
     ".bmp",
-    ".webp"
+    ".webp",
 )
+
 
 def extract_urls_from_text(text):
 
-    if pd.isna(text):
+    if text is None:
         return []
 
     text = str(text)
@@ -24,40 +26,42 @@ def extract_urls_from_text(text):
     valid_urls = []
 
     for url in matches:
-
-        lower_url = url.lower()
-
-        if any(ext in lower_url for ext in VALID_EXTENSIONS):
+        if any(ext in url.lower() for ext in VALID_EXTENSIONS):
             valid_urls.append(url)
 
     return valid_urls
 
 
-def process_excel_file(file_path):
+def read_rows(file_bytes):
+    """Read the first worksheet into (headers, list-of-dict-rows) using openpyxl.
 
-    df = pd.read_excel(file_path)
+    Avoids pandas/numpy so the function stays small enough for serverless.
+    """
 
-    extracted_data = []
+    wb = load_workbook(
+        filename=BytesIO(file_bytes),
+        read_only=True,
+        data_only=True,
+    )
 
-    for index, row in df.iterrows():
+    ws = wb.active
 
-        user_name = str(
-            row.get("user_name", f"user_{index}")
-        ).strip()
+    rows = list(ws.iter_rows(values_only=True))
 
-        row_urls = []
+    if not rows:
+        return [], []
 
-        for column in df.columns:
+    headers = [
+        str(h).strip() if h is not None else f"col_{i}"
+        for i, h in enumerate(rows[0])
+    ]
 
-            cell_value = row[column]
+    data = []
 
-            urls = extract_urls_from_text(cell_value)
+    for r in rows[1:]:
+        row = {}
+        for i, h in enumerate(headers):
+            row[h] = r[i] if i < len(r) else None
+        data.append(row)
 
-            row_urls.extend(urls)
-
-        extracted_data.append({
-            "user_name": user_name,
-            "urls": row_urls
-        })
-
-    return extracted_data
+    return headers, data

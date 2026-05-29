@@ -1,62 +1,36 @@
-import os
-import pandas as pd
-from datetime import datetime
+import csv
+import io
 
-def generate_download_report(results, output_dir="reports"):
 
-    success = []
-    failed = []
-    duplicates = []
+def summarize(results):
 
-    for item in results:
+    success = sum(1 for r in results if r.get("status") == "success")
+    duplicates = sum(1 for r in results if r.get("status") == "duplicate")
+    failed = sum(
+        1 for r in results
+        if r.get("status") not in ("success", "duplicate")
+    )
 
-        status = item.get("status")
-
-        if status == "success":
-            success.append(item)
-
-        elif status == "duplicate":
-            duplicates.append(item)
-
-        else:
-            failed.append(item)
-
-    report = {
+    return {
         "total": len(results),
-        "success": len(success),
-        "failed": len(failed),
-        "duplicates": len(duplicates)
+        "success": success,
+        "failed": failed,
+        "duplicates": duplicates,
     }
 
-    timestamp = datetime.now().strftime(
-        "%Y%m%d_%H%M%S"
-    )
 
-    os.makedirs(output_dir, exist_ok=True)
+def build_report_csv(results):
 
-    report_path = os.path.join(
-        output_dir,
-        f"report_{timestamp}.xlsx"
-    )
+    out = io.StringIO()
+    writer = csv.writer(out)
 
-    with pd.ExcelWriter(report_path) as writer:
+    writer.writerow(["status", "file_or_url", "size"])
 
-        pd.DataFrame(success).to_excel(
-            writer,
-            sheet_name="Success",
-            index=False
-        )
+    for r in results:
+        writer.writerow([
+            r.get("status", ""),
+            r.get("file") or r.get("url", ""),
+            r.get("size", ""),
+        ])
 
-        pd.DataFrame(failed).to_excel(
-            writer,
-            sheet_name="Failed",
-            index=False
-        )
-
-        pd.DataFrame(duplicates).to_excel(
-            writer,
-            sheet_name="Duplicates",
-            index=False
-        )
-
-    return report, report_path
+    return out.getvalue()

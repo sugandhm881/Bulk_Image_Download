@@ -3,7 +3,7 @@ import API from "../services/api";
 import toast from "react-hot-toast";
 import { FaFileExcel, FaUpload, FaTimes } from "react-icons/fa";
 
-function UploadBox({ onStart, onProgress, onComplete }) {
+function UploadBox({ onComplete }) {
 
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -19,18 +19,6 @@ function UploadBox({ onStart, onProgress, onComplete }) {
     if (inputRef.current) inputRef.current.value = "";
   };
 
-  const handleMessage = (msg) => {
-    if (msg.type === "start") {
-      if (onStart) onStart(msg.total);
-    } else if (msg.type === "progress") {
-      if (onProgress) onProgress(msg);
-    } else if (msg.type === "done") {
-      if (onComplete) onComplete(msg);
-      toast.success(msg.message || "Download Completed Successfully");
-      clearFile();
-    }
-  };
-
   const handleUpload = async () => {
 
     if (!file) return;
@@ -42,47 +30,19 @@ function UploadBox({ onStart, onProgress, onComplete }) {
 
       setLoading(true);
 
-      const res = await fetch(
-        `${API.defaults.baseURL}/upload-excel`,
+      const { data } = await API.post(
+        "/upload-excel",
+        formData,
         {
-          method: "POST",
-          body: formData,
+          headers: { "Content-Type": "multipart/form-data" },
         }
       );
 
-      if (!res.ok || !res.body) {
-        throw new Error(`Server error ${res.status}`);
-      }
+      if (onComplete) onComplete(data);
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
+      toast.success(data.message || "Download Completed Successfully");
 
-      while (true) {
-
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        let idx;
-        while ((idx = buffer.indexOf("\n")) >= 0) {
-
-          const line = buffer.slice(0, idx).trim();
-          buffer = buffer.slice(idx + 1);
-
-          if (!line) continue;
-
-          let msg;
-          try {
-            msg = JSON.parse(line);
-          } catch {
-            continue;
-          }
-
-          handleMessage(msg);
-        }
-      }
+      clearFile();
 
     } catch (error) {
 
@@ -111,7 +71,7 @@ function UploadBox({ onStart, onProgress, onComplete }) {
         ref={inputRef}
         id="excel-input"
         type="file"
-        accept=".xlsx,.xls"
+        accept=".xlsx"
         onChange={handleSelect}
         className="hidden"
         disabled={loading}

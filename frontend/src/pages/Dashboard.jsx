@@ -8,45 +8,33 @@ import {
 } from "react-icons/fa";
 import UploadBox from "../components/UploadBox";
 import StatsCard from "../components/StatsCard";
-import ProgressCard from "../components/ProgressCard";
 import DownloadTable from "../components/DownloadTable";
-import API from "../services/api";
+
+function base64ToBlobUrl(b64) {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const blob = new Blob([bytes], { type: "application/zip" });
+  return URL.createObjectURL(blob);
+}
 
 function Dashboard() {
 
   const [summary, setSummary] = useState(null);
   const [results, setResults] = useState([]);
   const [downloadUrl, setDownloadUrl] = useState(null);
-  const [progress, setProgress] = useState(null);
-
-  const handleStart = (total) => {
-    setDownloadUrl(null);
-    setResults([]);
-    setSummary({ total, success: 0, failed: 0, duplicates: 0 });
-    setProgress({ done: 0, total, speed_bps: 0, file: "", active: true });
-  };
-
-  const handleProgress = (m) => {
-    setSummary({
-      total: m.total,
-      success: m.success,
-      failed: m.failed,
-      duplicates: m.duplicates,
-    });
-    setProgress({
-      done: m.done,
-      total: m.total,
-      speed_bps: m.speed_bps,
-      file: m.file,
-      active: true,
-    });
-  };
+  const [filename, setFilename] = useState("images.zip");
 
   const handleComplete = (data) => {
     setSummary(data.summary || null);
     setResults(data.results || []);
-    setDownloadUrl(data.download_url || null);
-    setProgress((p) => (p ? { ...p, active: false } : null));
+
+    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+
+    if (data.zip_base64) {
+      setDownloadUrl(base64ToBlobUrl(data.zip_base64));
+      setFilename(data.filename || "images.zip");
+    } else {
+      setDownloadUrl(null);
+    }
   };
 
   return (
@@ -61,26 +49,17 @@ function Dashboard() {
 
       </div>
 
-      <UploadBox
-        onStart={handleStart}
-        onProgress={handleProgress}
-        onComplete={handleComplete}
-      />
-
-      {progress && (
-        <div className="mt-6">
-          <ProgressCard {...progress} />
-        </div>
-      )}
+      <UploadBox onComplete={handleComplete} />
 
       {downloadUrl && (
         <div className="mt-6 bg-green-500/10 border border-green-500/30 rounded-2xl p-5 flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="text-center sm:text-left">
             <p className="font-semibold text-green-400">Your images are ready</p>
-            <p className="text-slate-400 text-sm">Bundled into a single ZIP, including the summary report.</p>
+            <p className="text-slate-400 text-sm">Bundled into a single ZIP, including a report.csv.</p>
           </div>
           <a
-            href={`${API.defaults.baseURL}${downloadUrl}`}
+            href={downloadUrl}
+            download={filename}
             className="inline-flex items-center gap-2 bg-green-500 hover:bg-green-600 px-6 py-3 rounded-lg font-semibold transition-colors shrink-0"
           >
             <FaDownload />
